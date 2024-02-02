@@ -1,0 +1,429 @@
+---
+title: "Loan Prediction Dataset"
+author: "Prajwal Gupta 1NT21IS114"
+date: "2024-02-02"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+This report presents my work of building a model that predicts the students' loan repayment rates. The dependent variable is present in the dataset in a disaggregated form
+and hence it is to be decided which one of them is to be used. These are continuous variables that contain many unidentified values. My model will predict those
+values with a good accuracy. 
+
+This document describes the entire process in the form of a neat reproducible research work.
+
+# Objective
+
+**Using Institutional Features to Predict Students' Ability to Repay Educational Loans**
+
+## Context
+
+During their college education, most students incur a significant amount of debt. The average debt can vary from one institute to the other and so can the students' repayment rates. Different factors can influence the debt and repayment including institute features and the students' earnings after graduating. 
+
+This project explores to what extent institutional characteristics, as well as certain other factors, can predict debt repayment. For self-testing purposes, the accuracy of the prediction system, which is assessed using the metric **RMSE** (Root Mean Squared Error), on the hold-out from the training data (validation set) should be comparable to the accuracy calculated on the training data.
+
+# Approach
+
+College Scorecard Dataset provides the cohort data for every year since 1996. For this project, I have taken the dataset for the cohort of 2011 since most of its features are available (not null). This section broadly covers my approach to completing the work.
+
+## Feature Selection
+
+Since the dataset is huge and consists of a large number of features, I resort to picking up a small subset of useful-looking features from the dataset. It would be counterproductive to investigate each feature by itself. Through some exploratory analysis and good judgement, we can initially pick a few seemingly important features that may influence the loan repayment rates. However, before that, we would need to choose our response variable. 
+
+### Response Variable
+
+The response variable is present in disaggregated form. Repayment rate, which is the fraction of students properly repaying their loans, is a value in the range of 0-1. I choose `RPY_3YR_RT` as the response variable which is defined in the data dictionary as "Fraction of cohort who are not in default and whose loan balances have declined for three years". 
+
+### Predictor Variables
+
+After spending a considerable amount of time exploring the data dictionary and the dataset, I have decided to select the following features for further analysis:-
+
+Feature Name            |   Description
+------------------------|-------------------------------------------------------------------------
+**INSTNM**              | Institution name
+**STABBR**              | State postcode
+**CONTROL**             | Control of institution
+**GRAD_DEBT_MDN**       | The median debt for students who have completed
+**COMP_ORIG_YR4_RT**    | Percent completed within 4 years at original institution
+**PCTFLOAN**            | Percent of all undergraduate students receiving a federal student loan
+**MD_EARN_WNE_P8**      | Median earnings of students working and not enrolled 8 years after entry
+**CDR3**                | Three-year cohort default rate
+**DEP_INC_AVG**         | Average family income of dependent students
+**UG25ABV**             | Percentage of undergraduates aged 25 and above
+**HIGHDEG**             | Highest degree awarded
+**UGDS**                | Enrollment of undergraduate certificate/degree-seeking students
+**COSTT4_A**            | Average cost of attendance (academic year institutions)
+**COSTT4_P**            | Average cost of attendance (program-year institutions)
+**PAR_ED_PCT_PS**       | Percent of students whose parents' highest educational level is some form of postsecondary education
+
+These 17 features shown above are selected due to their potential usefulness and after considering many features from the dataset and the data dictionary. This task of feature selection has been done manually. Their vetting, however, doesn't stop here. They will be analyzed further in the subsequent stages till the modeling phase. 
+
+## Handling Missing Values
+
+Missing values in this dataset are not clearly obvious. We can see **NULL** values instead of **NA** across different features along with some unknown values called **PrivacySuppressed**. From the official documentation on the College Scorecard website, data shown as PrivacySuppressed are the data which are not reported in order to protect an individual's privacy. The presence of these values hinders the predictive ability of our features. We can either opt for removing the entire rows containing such data or converting these values into NA and then imputing them using different methods. I try to go ahead with the latter. Values shown as PrivacySuppressed come in the category of **randomly missing data** and can be definitely imputed but the NULL values can either be **randomly** or **non-randomly missing data**. We shouldn't try to impute non-random missing data using typical imputation methods. It's better to either remove them or investigate the method through which the data was collected. I will remove them. Moreover, if certain rows contain far too many NA values, I will remove them as well. 
+
+## Modeling and Evaluating Linear Regression Model
+
+After analyzing the features and imputing the randomly missing values, I will train a linear regression model and to check how it will perform on unseen data, I will perform 10-fold cross-validation.
+
+## Making Predictions
+
+Since I am keeping away the `RPY_3YR_RT` variable for the sake of predicting it through my model, I will create a separate test set before training my model that will store the examples having missing Repayment Rate values. Afterwards, I will predict those missing values.
+
+# Execution
+
+## Loading Data
+
+First, I load all the necessary packages.
+
+```{r, message = FALSE, warning = FALSE}
+library(dplyr) 
+library(Amelia) 
+library(ggplot2)
+library(mice)
+library(lattice)
+library(gridExtra)
+library(caret)
+```
+
+One may be required to install these packages from the CRAN first if they don't exist in the system before. 
+
+Next, I read my dataset and the features that I had selected before. 
+
+```{r, message=FALSE, warning=FALSE}
+# read the file 2011 cohorts
+schoolDf <- read.csv('MERGED2011_PP.csv')
+
+schoolDf_sub <- schoolDf %>% select(INSTNM, STATE = STABBR, CONTROL, HIGHDEG,
+                                    COSTA = COSTT4_A, COSTP = COSTT4_P,
+                                    UGDS, UG25ABV = UG25abv, COMP_ORIG_YR4_RT, 
+                                    FAM_INC = DEP_INC_AVG, FAM_EDU = PAR_ED_PCT_PS,
+                                    PCTFLOAN, MD_EARN_WNE_P8 = md_earn_wne_p8,
+                                    GRAD_DEBT_MDN, CDR3, RPY_3YR_RT)
+
+# remove the huge data frame schoolDf as we're not going to use it again.
+rm(schoolDf)
+```
+
+## Wrangling
+
+First, I will redefine a couple of my features, `CONTROL` and `HIGHDEG`, using their definition from the data dictionary. 
+
+```{r, message=FALSE, warning=FALSE}
+controlTable <- data.frame(CONTROL = c(1, 2, 3), OWNERSHIP = c("Public", "Private nonprofit", "Private for-profit"))
+degTable <- data.frame(HIGHDEG = c(0, 1, 2, 3, 4), Degree = c("Non-degree-granting", "Certificate degree", "Associate degree", "Bachelor's degree", "Graduate degree"))
+
+# Now Inner join with schoolDf_sub dataframe
+schoolDf_sub2 <- inner_join(x = schoolDf_sub, y = controlTable)
+# and once more
+schoolDf_sub2 <- inner_join(x = schoolDf_sub2, y = degTable)
+
+# now copy and paste the newly added features to CONTROL and HIGHDEG and remove the last two features afterwards
+schoolDf_sub2$CONTROL <- schoolDf_sub2$OWNERSHIP
+schoolDf_sub2$HIGHDEG <- schoolDf_sub2$Degree
+schoolDf_sub2 <- schoolDf_sub2[, c(-17, -18)]
+```
+
+Now, I will operate on `COSTA` and `COSTP`. From the data dictionary, COSTT4_A (COSTA) and COSTT4_P (COSTP) are the average costs of attendance for academic-year institutions and program-year institutions respectively. There are too many missing values and as obvious, some of them must be **non-random NA** values. This is because only the academic-year institutions will have a value for COSTA feature and NULL for the rest and vice-versa. I can go ahead and *engineer* a common feature representing the cost of attendance irrespective of whether the institute is an academic-year based or program-year. 
+
+```{r, message=FALSE, warning=FALSE}
+# first it is required to convert factor to character before converting to numeric
+schoolDf_sub2$COSTA <- as.numeric(as.character(schoolDf_sub2$COSTA))
+schoolDf_sub2$COSTP <- as.numeric(as.character(schoolDf_sub2$COSTP))
+
+# make the non-random NA values equal to zero. 
+schoolDf_sub2$COSTA[is.na(schoolDf_sub2$COSTA) & !is.na(schoolDf_sub2$COSTP)] <- 0
+schoolDf_sub2$COSTP[is.na(schoolDf_sub2$COSTP) & !is.na(schoolDf_sub2$COSTA)] <- 0
+
+# now use mutate to create a feature for the cost of attendance
+schoolDf_cost <- schoolDf_sub2 %>% mutate(ATDCOST = COSTA + COSTP)
+
+# remove the old cost features and move the new feature to the correct position
+schoolDf_cost2 <- schoolDf_cost[, c(1:4, 17, 7:16)]
+summary(schoolDf_cost2)
+
+# some institutes seem to have duplicate entries. So clear them.
+schoolDf2 <- schoolDf_cost2
+schoolDf2 <- unique(schoolDf2)
+```
+
+For identifying more non-random NA values, I can form a rule and remove the resulting rows. 
+
+```{r, message=FALSE, warning=FALSE}
+schoolDf2_sub <- schoolDf2 %>% filter(!(PCTFLOAN == "0" & (GRAD_DEBT_MDN == "PrivacySuppressed" | GRAD_DEBT_MDN == "NULL") & (RPY_3YR_RT == "NULL" | RPY_3YR_RT == "PrivacySuppressed")))
+
+# After subsetting, some factor levels remain even when the observation is removed. We can reset the factor levels this way:
+schoolDf2_sub <- droplevels(schoolDf2_sub)
+```
+
+Up to this point, almost all the numeric features still exist in the form of factor. I will convert them to numeric at once and release all the NA values from the *NULL* and *PrivacySuppressed* values in the process.
+
+```{r, message=FALSE, warning=FALSE}
+# set of features to be converted to numeric
+toNumeric <- names(schoolDf2_sub[, -c(1:5)])
+nextSchoolDf <- schoolDf2_sub
+
+# convert all to numeric in one go
+nextSchoolDf[toNumeric] <- nextSchoolDf[toNumeric] %>% lapply(FUN = function(x) { as.numeric(as.character(x)) })
+str(nextSchoolDf)
+```
+
+## Missingness and some more wrangling
+
+First of all, let's try to visualize the missingness in the dataset obtained so far using the `missmap` function of the Amelia package.
+
+```{r, message=FALSE, warning=FALSE}
+missmap(nextSchoolDf, col=c('grey', 'steelblue'), y.cex=0.5, x.cex=0.8)
+```
+
+Displayed above is the map of missingness in our dataset. We can see some horizontal lines stretching across from one direction to another. These are the rows that contain many NA values. We will first try to get rid of those rows before carrying out any imputation on the rest. 
+
+One more thing we can observe from the visualization is that a few features have contiguous NAs in the bottom portion of the dataset.
+
+To move forward, I can make another feature that will contain the number of occurrences of NA values in each row. Then I can remove those rows that have too many NAs. 
+
+```{r, message=FALSE, warning=FALSE}
+nextSchoolDf$countNA <- rowSums(is.na(nextSchoolDf))
+summary(nextSchoolDf)
+```
+
+As can be seen from the summary above, the first 4 features don't contain any NA value. The rest of the 11 features contain NA values. Let's try to tabulate the `countNA` feature and get a sense of what it depicts.
+
+```{r, message=FALSE, warning=FALSE}
+misRows <- data.frame(table(nextSchoolDf$countNA))
+names(misRows) <- c("NACount", "Freq")
+
+# Now, let's also calculate the cumulative frequency
+misRows$CumFreq <- cumsum(misRows$Freq)
+
+# visualize the tabular data for more insights
+ggplot(misRows, aes(x = NACount, y = CumFreq, group = 1)) +
+  geom_line() +
+  geom_point(size = 2) + 
+  geom_text(aes(label = CumFreq), hjust = 0, vjust = 1.5)
+```
+
+Our goal here basically is to allow the rows that have as less NA values as possible while also keeping as many observations in the dataset as possible. So, what we need here is a tradeoff between `NACount` and `CumFreq`. An appropriate **threshold** can help us achieve that tradeoff. 
+
+Upon inspecting the plot above, we can see that up to the mark 5 at the x-axis, the slope is fairly good. From the next value mark 6, the plot seems to be saturating. `NACount` equal to 5 seems a pretty reasonable choice for threshold. This means that I will remove all the rows having **NACount** greater than 5 and keep the rest. This choice will retain many observations in my dataset as well as delete those that have more than 5 NA values. 
+
+```{r, message=FALSE, warning=FALSE}
+noLinesDf <- nextSchoolDf %>% filter(countNA <= 5)
+# 6572 rows
+
+# Let's again create a new missmap to show contrast with the previous one
+par(mfrow = c(1,2))
+missmap(nextSchoolDf, col=c('grey', 'steelblue'), y.cex=0.5, x.cex=0.8, main = "Before")
+missmap(noLinesDf, col=c('grey', 'steelblue'), y.cex=0.5, x.cex=0.8, main = "After")
+```
+
+From the above illustration, we can see how the long horizontal lines showing missingness have faded away.
+
+Now, as a part of some more wrangling, I see another feature of interest here: `UGDS`. **UGDS** directly can't be used effectively as a predictor because it's an absolute value (not relative like %age), and the number of degree-seeking students enrolling can vary hugely across different schools.
+
+So, what I aim to do here is create a new feature called `INST_ENSIZE` which will be an institutional feature directly derived from **UGDS**. Short for "Institution Enrollment Size", it will be a categorical feature which will make more sense for prediction instead of using **UGDS**. 
+
+Let's first visualize the distribution of values in **UGDS**.
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(noLinesDf, aes(x = "UGDS", y = UGDS)) + 
+  geom_boxplot() +
+  ggtitle("Distribution of enrollment at different schools")
+```
+
+From this boxplot, it is evident that the range of values for **UGDS** is extremely big. There are also many outliers present in the feature. We'll break **UGDS** down into categories to overcome the impact of outliers on the predictive model that we are going to build. 
+
+To determine the number of categories, let's try to plot a histogram. 
+
+```{r, warning=FALSE, message=FALSE}
+summary(noLinesDf$UGDS)
+ggplot(noLinesDf, aes(x = UGDS)) + 
+  geom_histogram()
+```
+
+We can see from above that the distribution of **UGDS** is positively skewed, or skewed to the right. Moreover, mean > median also confirms the same. I will now try to break **UGDS** into categories near the quartile and median values, in the way as shown below:
+
+```{r, message=FALSE, warning=FALSE}
+noLinesDf$INST_ENSIZE <- NA
+noLinesDf$INST_ENSIZE[noLinesDf$UGDS <= 150] <- "Very Small"
+noLinesDf$INST_ENSIZE[noLinesDf$UGDS > 150 & noLinesDf$UGDS <= 500] <- "Small"
+noLinesDf$INST_ENSIZE[noLinesDf$UGDS > 500 & noLinesDf$UGDS <= 2500] <- "Medium"
+noLinesDf$INST_ENSIZE[noLinesDf$UGDS > 2500 & noLinesDf$UGDS <= 15000] <- "Large"
+noLinesDf$INST_ENSIZE[noLinesDf$UGDS > 15000] <- "Very Large"
+noLinesDf$INST_ENSIZE <- as.factor(noLinesDf$INST_ENSIZE)
+
+# visualizing the new feature
+ggplot(noLinesDf, aes(x = INST_ENSIZE, fill = INST_ENSIZE)) + 
+  geom_bar(alpha = 0.5) + 
+  xlab("Institute Enrollment Size")
+```
+
+Fair enough, let's replace `UGDS` with `INST_ENSIZE`. After that, my data frame will be ready for imputation of all the remaining NA values. I am going to use MICE imputation technique for that. 
+
+```{r, message=FALSE, warning=FALSE}
+miceImpDf <- noLinesDf
+miceImpDf$UGDS <- miceImpDf$INST_ENSIZE
+miceImpDf <- miceImpDf[, c(1:16)]
+colnames(miceImpDf)[6] <- "INST_ENSIZE"
+```
+
+Now, I can apply MICE imputation on the data frame. MICE stands for Multiple Imputation using Chained Equations. It will take care of all the NA values, all of which are hopefully completely random NA values. Moreover, I will remove a few features from imputation, particularly the response variable. This is because I am going to use the rows having missing values in the response variable in the **TEST** set. 
+
+```{r, message=FALSE, warning=FALSE, results="hide"}
+# set a random seed
+set.seed(165)
+# use the CART or Decision Tree method in mice
+mice_mod <- mice(miceImpDf[, !names(miceImpDf) %in% c("INSTNM", "countNA", "RPY_3YR_RT")], 
+                 method = "cart")
+```
+
+To inspect the results of imputation, I can create density plots. 
+
+```{r, message=FALSE, warning=FALSE}
+# inspecting the result
+densityplot(mice_mod)
+```
+
+We expect the density plots to be similar, if not equal, which they seem to be. I can place the imputed values back into the dataset.
+
+```{r, message=FALSE, warning=FALSE}
+mice_output <- complete(mice_mod)
+
+# let's place this into the same dataframe
+verifyMice <- miceImpDf
+verifyMice[, c(2:14)] <- mice_output
+```
+
+Let's just visualize to compare how the data frame looks like before and after imputation. 
+
+```{r, message=FALSE, warning=FALSE}
+# first, visualize the categorical variable INST_ENSIZE
+plot1 <- ggplot(miceImpDf, aes(x = INST_ENSIZE, fill = INST_ENSIZE)) +
+  geom_bar(alpha = 0.5) + 
+  ggtitle("Before Imputation")
+
+plot2 <- ggplot(verifyMice, aes(x = INST_ENSIZE, fill = INST_ENSIZE)) +
+  geom_bar(alpha = 0.5) + 
+  ggtitle("After Imputation")
+
+grid.arrange(plot1, plot2, nrow = 1, ncol = 2)
+
+# now the rest of the variables using boxplot
+par(las = 2, mfrow = c(1,2))
+boxplot(miceImpDf[, c(5, 7:14)])
+boxplot(verifyMice[, c(5, 7:14)])
+```
+
+We observe that nothing looks out of ordinary when comparing. There is no drastic change in the distributions which confirms that our imputation using MICE was carried out well. 
+
+I have my final imputed dataset. Before splitting into *training* and *test* sets, I will shuffle the rows in the dataset and perform a few other important tasks. 
+
+```{r, message=FALSE, warning=FALSE}
+# remove the countNA variable
+imputedDf <- verifyMice[, -16]
+
+# set a seed and shuffle the rows
+set.seed(243)
+schoolData <- imputedDf[sample(nrow(imputedDf)), ]
+
+# backUp; to be used later
+backUp <- schoolData
+
+# Let's remove the INSTNM feature right here
+schoolData <- schoolData[, c(2:15)]
+```
+
+## Modeling
+
+Now comes the part where I am actually going to start creating a predictive system. Since my task involves predicting continuous values, I will have to create my model according to that. I will apply a linear regression model to solve this prediction problem. 
+First of all, I will split the dataset I have right now into **train** and **test** sets. The **train** set will be used to train and cross-validate my machine learning model, and the **test** set for the predictive task. 
+
+```{r, message=FALSE, warning=FALSE}
+# splitting into train and test set
+train <- schoolData %>% filter(!is.na(RPY_3YR_RT))
+test <- schoolData %>% filter(is.na(RPY_3YR_RT))
+```
+
+Now, I can start training my model. I will use the functions contained in the caret, which is a machine learning package. I am also going to use **cross-validation** for evaluating the algorithms's performance.
+
+```{r, message=FALSE, warning=FALSE}
+# training a linear regression model using 10-fold cross-validation
+control <- trainControl(method = "cv", number = 10)
+modelFit <- train(RPY_3YR_RT ~ ., data = train, method = "lm", metric = "RMSE", trControl = control)
+
+# check the performance on the training set, how well my model fits the training set using cross-validation
+print(modelFit)
+
+# checking variable importance
+importance <- varImp(modelFit, scale = FALSE)
+print(importance)
+plot(importance, top = 22)
+```
+
+We can get some important insights from above: first, the RMSE and Rsquared values seem good enough; and then, the plot of importance of various features in training the linear regression model. 
+
+As we can see, many features were very important, while some features were not so much, eg, `FAM_EDU` and `COMP_ORIG_YR4_RT`. Surprisingly, `COMP_ORIG_YR4_RT` is somewhere on the least important side and is not even visible in the plot. On the other hand, `CDR3` (Cohort Default Rates) has a critical impact on the predictions. Also `FAM_INC` (Average family income of dependent students) is very important. Median earnings of students 8 years after entry, average cost of attendance, median debt for students who have completed, etc are some other important features.
+
+If we want, we can go ahead by removing the less important features and keep only the higher ones. It may or may not improve the model. I am just going to stick with my present model.
+
+Finally, I can extend this model to predict the loan repayment rates in the test set as well. However, there wouldn't be any way of assessing the accuracy in that case as there is no way of knowing the actual values.
+
+```{r, message=FALSE, warning=FALSE}
+# making predictions on the test set
+Predictions <- predict(modelFit, test)
+summary(Predictions)
+
+# A few values seem to be greater than and less than 1 and 0 respectively. I can correct them in the way shown below.
+Predictions[Predictions > 1] <- 1
+Predictions[Predictions < 0] <- 0
+
+# include the predictions and INSTNM from the backUp dataframe created earlier into the test set
+test$RPY_3YR_RT <- Predictions
+test$INSTNM <- backUp$INSTNM[is.na(backUp$RPY_3YR_RT)]
+test <- test[, c(15, 1:14)]
+```
+
+Now, since the primary predictive task is complete, I can attempt to recreate the entire dataset and then generate some visualizations to gain a few insights.
+
+```{r, message = FALSE, warning = FALSE}
+trainSet <- backUp[!is.na(backUp$RPY_3YR_RT), ]
+
+# bind
+finalData <- rbind(trainSet, test)
+
+# generating some visual results
+## One visualization of 20 schools with minimum student repayment rates
+minRPY <- arrange(finalData, RPY_3YR_RT)[1:20, ]
+minRPY$INSTNM <- factor(minRPY$INSTNM, levels = minRPY$INSTNM)
+ggplot(minRPY, aes(x = INSTNM, fill = CONTROL, y = RPY_3YR_RT)) +
+      geom_bar(stat = "identity") +
+      geom_text(aes(x = INSTNM, hjust = 1.05, label = paste0(RPY_3YR_RT * 100, "%")), size = 4) +
+      coord_flip() +
+      xlab("Colleges") + ylab("Loan Repayment Rates (in %age)") + 
+      ggtitle("Institutes with minimum student loan repayment rates")
+      
+## Colleges with 100% student repayment rates with highest earnings as well
+maxRPY <- finalData[finalData$RPY_3YR_RT == 1, ] %>% arrange(desc(MD_EARN_WNE_P8))
+maxRPY20 <- maxRPY[1:20, ]
+maxRPY20$INSTNM <- factor(maxRPY20$INSTNM, levels = maxRPY20$INSTNM)
+ggplot(maxRPY20, aes(x = INSTNM, fill = CONTROL, y = MD_EARN_WNE_P8)) + 
+      geom_bar(stat = "identity") + 
+      geom_text(aes(x = INSTNM, hjust = 0.95, label = paste0("$",MD_EARN_WNE_P8)), size = 4) +
+      coord_flip() + 
+      xlab("Colleges") + ylab("Median Earnings of Students Working 8 Years After Entry (in $)") +
+      ggtitle("Earnings of students who passed from colleges recording 100% student loan repayment")
+```
+
+From the first plot, it is obvious that least loan repayment rates are associated with only the private institutes, particularly, the **private for-profit** ones. 
+There was only a single **private nonprofit** college while not even a single **public** college. In the second plot of colleges recording 100% loan repayment, most 
+colleges that occupied the plot showing maximum student earnings after 8 years were the **private nonprofit** ones. **Public** and **private for-profit** scored
+somewhat equal share in the plot, both having 3 and 4 institutes respectively.
+
+# Conclusion
+
+The RMSE score was kept to a low level and the RSquared value was fairly high. So, the model has performed quite well and the loan repayment rates of students that are reported in the test set should be quite close to actual values.
+
+This work was the second part of my previous work on the same College Scorecard dataset. One may visit [this](https://rpubs.com/random_Island/education-loan-repayment) link to view my previous work on this.
+
+Any future work in this project may include implementing some other machine learning models like knn (k-nearest neighbors), rpart (decision trees), etc. and training the model with only top important features.
